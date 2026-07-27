@@ -1,12 +1,17 @@
 import os
 import re
 import requests
+from bs4 import BeautifulSoup
 from datetime import datetime
-from playwright.sync_api import sync_playwright
 
+# Supabase Credentials
 BASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
 DB_API_KEY = os.getenv("SUPABASE_KEY", "")
 DB_API_URL = f"{BASE_URL}/rest/v1/jobs" if BASE_URL else ""
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+}
 
 def clean_text(text):
     return re.sub(r'\s+', ' ', text).strip() if text else ""
@@ -17,7 +22,8 @@ def check_duplicate(link_url):
     try:
         res = requests.get(
             f"{DB_API_URL}?source_url=eq.{link_url}",
-            headers={"apikey": DB_API_KEY, "Authorization": f"Bearer {DB_API_KEY}"}
+            headers={"apikey": DB_API_KEY, "Authorization": f"Bearer {DB_API_KEY}"},
+            timeout=10
         )
         return len(res.json()) > 0
     except Exception as e:
@@ -26,7 +32,7 @@ def check_duplicate(link_url):
 
 def push_to_database(data):
     if not DB_API_URL or not DB_API_KEY:
-        print("[WARN] Missing Supabase Keys.")
+        print("[WARN] Missing Supabase API URL or Key.")
         return
     headers = {
         "apikey": DB_API_KEY,
@@ -34,68 +40,50 @@ def push_to_database(data):
         "Content-Type": "application/json",
         "Prefer": "return=minimal"
     }
-    res = requests.post(DB_API_URL, json=data, headers=headers)
-    if res.status_code in [200, 201]:
-        print(f"[SUCCESS] Inserted: {data['title']}")
-    else:
-        print(f"[ERR] Insert failed ({res.status_code}): {res.text}")
+    try:
+        res = requests.post(DB_API_URL, json=data, headers=headers, timeout=10)
+        if res.status_code in [200, 201]:
+            print(f"[SUCCESS] Inserted: {data['title']}")
+        else:
+            print(f"[ERR] Insert failed ({res.status_code}): {res.text}")
+    except Exception as e:
+        print(f"[ERR] Push to DB failed: {e}")
 
-def scrape_with_playwright():
-    print("[*] Launching Headless Chromium Browser...")
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
-
-        # -------------------------------------------------------------
-        # SOURCE 1: UPSC Archives & Active Notifications (upsc.gov.in)
-        # -------------------------------------------------------------
-        print("[*] Scraping UPSC...")
-        try:
-            page.goto("https://upsc.gov.in/examinations/active-examinations", timeout=30000)
-            links = page.locator("a").all()
-            for link in links[:15]:
-                title = clean_text(link.inner_text())
-                href = link.get_attribute("href") or ""
-                if "notification" in href.lower() or "exam" in href.lower():
-                    full_url = href if href.startswith("http") else f"https://upsc.gov.in{href}"
-                    if title and len(title) > 10 and not check_duplicate(full_url):
-                        push_to_database({
-                            "title": title,
-                            "organization": "UPSC",
-                            "category": "Central",
-                            "post_type": "Latest Job",
-                            "source_url": full_url,
-                            "created_at": datetime.utcnow().isoformat()
-                        })
-        except Exception as e:
-            print(f"[ERR] UPSC Scrape failed: {e}")
-
-        # -------------------------------------------------------------
-        # SOURCE 2: NTA (NEET / JEE / CUET Announcements)
-        # -------------------------------------------------------------
-        print("[*] Scraping NTA...")
-        try:
-            page.goto("https://nta.ac.in/", timeout=30000)
-            items = page.locator("a[href*='.pdf']").all()
-            for item in items[:10]:
-                title = clean_text(item.inner_text())
-                href = item.get_attribute("href") or ""
-                full_url = href if href.startswith("http") else f"https://nta.ac.in/{href}"
-                if title and len(title) > 8 and not check_duplicate(full_url):
+def scrape_sarkari_updates():
+    print("[*] Scraping Live Govt Notifications...")
+    
+    # Target Portal: FreeJobAlert / RSS Feeds
+    url = "https://www.freejobalert.com/latest-notifications/"
+    try:
+        response = requests.get(url, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Scrape table rows or links
+        links = soup.find_all('a', href=True)
+        count = 0
+        for link in links:
+            title = clean_text(link.text)
+            href = link['href']
+            
+            # Simple keyword matching for official notices
+            if len(title) > 15 and any(kw in title.lower() for kw in ['recruitment', 'apply online', 'result', 'admit card', 'notification']):
+                if not check_duplicate(href):
+                    post_type = "Result" if "result" in title.lower() else ("Admit Card" if "admit" in title.lower() else "Latest Job")
                     push_to_database({
-                        "title": title,
-                        "organization": "National Testing Agency (NTA)",
-                        "category": "Entrance / Exams",
-                        "post_type": "Notice / Result",
-                        "source_url": full_url,
+                        "title": title[:200],
+                        "organization": "Govt Agency",
+                        "category": "Central/State",
+                        "post_type": post_type,
+                        "source_url": href,
                         "created_at": datetime.utcnow().isoformat()
                     })
-        except Exception as e:
-            print(f"[ERR] NTA Scrape failed: {e}")
-
-        browser.close()
+                    count += 1
+                    if count >= 10:  # Fetch top 10 fresh links
+                        break
+    except Exception as e:
+        print(f"[ERR] Scraper execution failed: {e}")
 
 if __name__ == "__main__":
-    print("--- Starting Multi-Source Scraping Cycle ---")
-    scrape_with_playwright()
-    print("--- Scraping Cycle Complete ---")
+    print("--- Starting Light Scraper Cycle ---")
+    scrape_sarkari_updates()
+    print("--- Scraping Cycle Finished ---")
