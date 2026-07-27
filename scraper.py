@@ -4,8 +4,12 @@ import requests
 from bs4 import BeautifulSoup
 from datetime import datetime
 
-DB_API_URL = os.getenv("SUPABASE_URL", "") + "/rest/v1/jobs"
+# Read environment variables
+BASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
 DB_API_KEY = os.getenv("SUPABASE_KEY", "")
+
+# Construct exact REST endpoint
+DB_API_URL = f"{BASE_URL}/rest/v1/jobs" if BASE_URL else ""
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -16,6 +20,7 @@ def clean_text(text):
 
 def check_duplicate(link_url):
     if not DB_API_URL or not DB_API_KEY:
+        print("[WARN] Missing SUPABASE_URL or SUPABASE_KEY.")
         return False
     try:
         response = requests.get(
@@ -29,8 +34,9 @@ def check_duplicate(link_url):
 
 def push_to_database(data):
     if not DB_API_URL or not DB_API_KEY:
-        print("[WARN] Missing Supabase API keys.")
+        print("[WARN] Missing Supabase environment variables.")
         return
+        
     headers = {
         "apikey": DB_API_KEY,
         "Authorization": f"Bearer {DB_API_KEY}",
@@ -41,7 +47,7 @@ def push_to_database(data):
     if res.status_code in [200, 201]:
         print(f"[SUCCESS] Inserted: {data['title']}")
     else:
-        print(f"[ERR] Failed to insert: {res.text}")
+        print(f"[ERR] Failed to insert ({res.status_code}): {res.text}")
 
 def scrape_ssc():
     print("[*] Monitoring SSC Updates...")
@@ -49,7 +55,10 @@ def scrape_ssc():
     try:
         response = requests.get(url, headers=HEADERS, timeout=10)
         soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Look for PDF notification links
         notices = soup.find_all('a', href=re.compile(r'\.pdf$', re.IGNORECASE))
+        print(f"[*] Found {len(notices)} PDF notices on SSC.")
         
         for item in notices[:10]:
             title = clean_text(item.text)
